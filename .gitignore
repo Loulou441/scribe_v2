@@ -224,3 +224,4 @@ comptes_rendus/*
 # Scribe - audio hors test
 audio_samples/*
 !audio_samples/test_audio_stt.mp4
+!audio_samples/test_injection_text.mp4
