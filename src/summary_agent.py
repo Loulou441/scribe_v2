@@ -8,7 +8,6 @@ from groq import APIError, APIConnectionError, RateLimitError
 from agent import Agent
 from config import LLM_MODEL
 from speech_to_text_agent import SpeechToTextAgent
-from formatteur_markdown import format_as_markdown, save_markdown_report
 import json
 
 PROMPT_PATH = Path(__file__).parent / "prompts_LLM" / "summary_generator_prompt.txt"
