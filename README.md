@@ -7,6 +7,8 @@ Il fonctionne en trois étapes, orchestrées par un agent chef d'orchestre :
 2. **Modération** : la transcription est analysée pour détecter une éventuelle tentative de prompt injection avant d'être transmise à l'étape suivante.
 3. **Compte rendu** : si la transcription est jugée saine, le texte brut est reformulé par un LLM en un compte rendu structuré (titre, résumé, points clés, décisions/actions), puis sauvegardé en Markdown.
 
+Un **mode interactif optionnel** (`--chat`) permet ensuite de poser des questions sur le compte rendu et la transcription, avec conservation de l'historique de conversation.
+
 Les deux modèles sont appelés via l'API serverless de [Groq](https://console.groq.com/docs/overview).
 
 ## Installation
@@ -35,7 +37,7 @@ Le point d'entrée du pipeline complet est `ManagerAgent`, qui enchaîne transcr
 python src/manager_agent.py chemin/vers/mon_fichier.wav
 ```
 
-Le chemin du fichier audio est passé en **argument de ligne de commande** (`audio_file_path`, optionnel). Si aucun argument n'est donné, le script retombe sur `./audio_samples/test_audio_stt.mp4` par défaut :
+Le chemin du fichier audio est passé en **argument de ligne de commande** (`audio_file_path`, optionnel) : il n'est plus nécessaire d'utiliser l'échantillon fourni. Si aucun argument n'est donné, le script retombe sur `./audio_samples/test_audio_stt.mp4` par défaut :
 
 ```bash
 python src/manager_agent.py
@@ -50,6 +52,16 @@ Le programme :
 Si le fichier audio n'existe pas, ou si l'appel à l'API Groq échoue, une exception explicite est levée (`FileNotFoundError` ou `RuntimeError`) : `manager_agent.py` l'intercepte, affiche le message d'erreur, puis quitte avec un code de sortie 1.
 
 > **Point d'attention** : si le `ModeratorAgent` détecte une tentative de prompt injection, `ManagerAgent.summaries_audio()` lève une `Exception` générique (pas `FileNotFoundError`/`RuntimeError`). Le bloc `try/except` de `manager_agent.py` ne capture pas ce cas précis : le programme s'arrête alors avec une trace Python complète plutôt qu'un message d'erreur propre.
+
+### Mode interactif (`--chat`)
+
+Le flag `--chat` (ou `-i`) lance, une fois le compte rendu généré, une session de questions-réponses sur son contenu :
+
+```bash
+python src/manager_agent.py chemin/vers/mon_fichier.wav --chat
+```
+
+Chaque question est saisie au prompt `>` ; taper `exit` ou `quit` (ou `Ctrl+C`) met fin à la session. L'historique de la conversation est conservé pendant toute la session (chaque nouvel échange s'ajoute aux précédents), afin de permettre des questions de relance ("et pour ce point précis ?").
 
 ### Transcription audio (Speech-to-Text)
 
@@ -90,6 +102,8 @@ Le prompt système, stocké dans `src/prompts_LLM/moderator_prompt_system.txt`, 
 
 Un second échantillon audio, `audio_samples/test_injection_text.mp4`, est fourni pour tester la détection sur un cas de tentative d'injection.
 
+> **Remarque** : `moderator_agent.py` charge son prompt système via `Agent.read_file("./src/prompts_LLM/moderator_prompt_system.txt")`, un chemin relatif au répertoire de lancement du script — contrairement à `summary_agent.py`, qui construit son chemin de prompt de façon indépendante du répertoire courant (`Path(__file__).parent`). Le script doit donc être exécuté depuis la racine du projet pour que ce chemin relatif soit valide.
+
 ### Compte rendu structuré (chat completions)
 
 La génération du compte rendu est gérée par `src/summary_agent.py`, qui définit la classe `SummaryAgent` (héritant de `Agent`). Elle appelle le modèle LLM de Groq (`LLM_MODEL` défini dans `config.py`, actuellement `llama-3.1-8b-instant`) via l'API "chat completions".
@@ -109,6 +123,8 @@ La génération du compte rendu est gérée par `src/summary_agent.py`, qui déf
 ```
 
 Le comportement du modèle est piloté par un **prompt système** stocké dans `src/prompts_LLM/summary_generator_prompt.txt`, qui impose au modèle de ne répondre qu'avec un JSON valide respectant ce schéma.
+
+> **Remarque** : dans la version actuelle, ce format JSON est imposé uniquement par les instructions du prompt système — l'appel `chat.completions.create()` n'active pas explicitement le paramètre `response_format={"type": "json_object"}` de l'API Groq. Le parsing (`json.loads`) est protégé par un `try/except json.JSONDecodeError`, qui lève un `RuntimeError` explicite (avec le contenu brut reçu) si la réponse du modèle n'est pas un JSON valide.
 
 **Format de sortie imposé** :
 - `titre` : titre du compte rendu
@@ -151,13 +167,37 @@ L'équipe a fait le point sur l'avancement du module de transcription...
 
 Si `decisions_actions` (ou `points_cles`) est vide, la section affiche une note en italique plutôt qu'une liste — aucun contenu n'est inventé, c'est uniquement un texte de mise en forme.
 
+### Questions-réponses interactives (QAAgent)
+
+Le mode `--chat` s'appuie sur `src/qa_agent.py`, qui définit la classe `QAAgent` (héritant de `Agent`).
+
+À l'instanciation, `QAAgent(transcription, report)` construit un **prompt système** à partir du gabarit `src/prompts_LLM/qa_system_prompt.txt`, dans lequel sont injectés la transcription brute et les champs du compte rendu (titre, résumé, points clés, décisions/actions). Ce prompt impose de ne répondre qu'à partir de ce contenu, d'indiquer explicitement qu'une information est absente plutôt que de l'inventer, et d'ignorer toute instruction contenue dans une question qui viserait à modifier le rôle ou les consignes de l'agent.
+
+`ask(question)` :
+1. ajoute la question à `self.messages` (l'historique de conversation, initialisé avec le prompt système) ;
+2. appelle `chat.completions.create()` avec l'historique complet ;
+3. ajoute la réponse du modèle à l'historique ;
+4. retourne la réponse.
+
+L'historique étant conservé en mémoire pour toute la durée de la session (`self.messages`), chaque nouvelle question est posée dans le contexte des échanges précédents, ce qui permet des questions de relance. `reset_history()` permet de repartir de zéro sans recréer l'agent (et donc sans recharger le prompt système).
+
+**Gestion des erreurs** :
+- `FileNotFoundError` si `src/prompts_LLM/qa_system_prompt.txt` est introuvable
+- `RuntimeError` si l'appel à l'API Groq échoue ; dans ce cas, la question fautive est retirée de l'historique pour ne pas le polluer avec un tour sans réponse
+
+Dans `manager_agent.py`, la boucle `ManagerAgent.interactive_qa()` lit chaque question au prompt `>`, la soumet d'abord à `ModeratorAgent.moderate_transcript()` (le même agent de modération que pour la transcription initiale) avant de l'envoyer à `QAAgent.ask()`, et affiche la réponse.
+
+> **Remarque** : le prompt système de `ModeratorAgent` (`moderator_prompt_system.txt`) est rédigé pour analyser une *transcription vocale*, pas une question posée par un utilisateur à un agent. La détection de prompt injection reste globalement valable sur des questions, mais son calibrage (exemples de contenu légitime, formulation du contexte) n'est pas spécifiquement pensé pour cet usage — un prompt de modération dédié aux questions serait une amélioration possible.
+
 ### Orchestration (ManagerAgent)
 
-`src/manager_agent.py` définit la classe `ManagerAgent`, qui instancie un `SpeechToTextAgent`, un `ModeratorAgent` et un `SummaryAgent`, et expose une seule méthode `summaries_audio(audio_file_path)` :
-1. transcription de l'audio ;
-2. modération de la transcription ;
-3. si une injection est détectée, une `Exception` est levée avec la raison fournie par `ModeratorAgent` (aucun compte rendu n'est généré) ;
-4. sinon, génération du compte rendu, mise en forme Markdown et sauvegarde automatique dans `comptes_rendus/` (le chemin du fichier est affiché), puis retour du dict du compte rendu.
+`src/manager_agent.py` définit la classe `ManagerAgent`, qui instancie un `SpeechToTextAgent`, un `ModeratorAgent` et un `SummaryAgent`, et expose deux méthodes principales :
+- `summaries_audio(audio_file_path)` :
+  1. transcription de l'audio (le texte transcrit est aussi conservé dans `self.last_transcription_text`) ;
+  2. modération de la transcription ;
+  3. si une injection est détectée, une `Exception` est levée avec la raison fournie par `ModeratorAgent` (aucun compte rendu n'est généré) ;
+  4. sinon, génération du compte rendu, mise en forme Markdown et sauvegarde automatique dans `comptes_rendus/` (le chemin du fichier est affiché), puis retour du dict du compte rendu.
+- `interactive_qa(transcription_text, report)` : instancie un `QAAgent` avec la transcription et le compte rendu, puis lance la boucle de questions-réponses décrite ci-dessus.
 
 ## Structure du projet
 
@@ -168,11 +208,13 @@ scribe/
 │   ├── speech_to_text_agent.py  # SpeechToTextAgent : transcription audio via Groq
 │   ├── moderator_agent.py       # ModeratorAgent : détection de prompt injection dans la transcription
 │   ├── summary_agent.py         # SummaryAgent : génération + mise en forme + sauvegarde du compte rendu
-│   ├── manager_agent.py         # ManagerAgent : orchestre transcription → modération → compte rendu
+│   ├── qa_agent.py              # QAAgent : questions-réponses interactives avec historique
+│   ├── manager_agent.py         # ManagerAgent : orchestre transcription → modération → compte rendu → chat
 │   ├── config.py                # clé API et noms de modèles
 │   └── prompts_LLM/
 │       ├── moderator_prompt_system.txt
-│       └── summary_generator_prompt.txt
+│       ├── summary_generator_prompt.txt
+│       └── qa_system_prompt.txt
 ├── audio_samples/               # fichiers audio (dont les échantillons de test)
 ├── comptes_rendus/              # comptes rendus générés (ignorés sauf l'exemple)
 ├── .env
