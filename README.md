@@ -2,9 +2,9 @@
 
 Scribe est un outil en ligne de commande qui transforme un enregistrement audio (réunion, cours, note vocale) en compte rendu écrit et structuré.
 
-Il fonctionne en deux étapes :
+Il fonctionne en deux étapes, orchestrées par un agent chef d'orchestre :
 1. **Transcription** : l'audio est converti en texte brut via un modèle Speech-to-Text.
-2. **Compte rendu** : le texte brut est reformulé par un LLM en un compte rendu structuré (titre, points clés, décisions, actions).
+2. **Compte rendu** : le texte brut est reformulé par un LLM en un compte rendu structuré (titre, résumé, points clés, décisions/actions).
 
 Les deux modèles sont appelés via l'API serverless de [Groq](https://console.groq.com/docs/overview).
 
@@ -18,61 +18,46 @@ source .venv/bin/activate  # sous Windows : venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Créer un fichier `.env` à la racine du projet contenant la clé API Groq :
+
+```
+GROQ_API_KEY=votre_cle_ici
+```
+
+Si cette variable est absente, `config.py` lève une `ValueError` explicite au démarrage.
+
 ## Utilisation
 
+Le point d'entrée du pipeline complet est `ManagerAgent`, qui enchaîne transcription puis compte rendu :
+
 ```bash
-python src/main.py audio_samples/test_audio_stt.mp4
+python src/manager_agent.py chemin/vers/mon_fichier.wav
 ```
 
-Le programme enchaîne automatiquement la transcription puis la génération du compte rendu, en affichant des messages de progression à chaque étape :
+Le chemin du fichier audio est passé en **argument de ligne de commande** (`audio_file_path`, optionnel). Si aucun argument n'est donné, le script retombe sur `./audio_samples/test_audio_stt.mp4` par défaut :
 
-```
-🎙️  Transcription en cours... (audio_samples/test_audio_stt.mp4)
-✅ Transcription terminée.
-✍️  Rédaction du compte rendu en cours...
-✅ Compte rendu généré.
-💾 Compte rendu sauvegardé dans : comptes_rendus/2026-07-06_101530_compte-rendu.md
+```bash
+python src/manager_agent.py
 ```
 
-Le fichier `comptes_rendus/2026-07-06_101530_compte-rendu.md` généré contient le compte rendu structuré, par exemple :
+Le programme :
+1. transcrit l'audio via `SpeechToTextAgent.get_text_from_audio()` ;
+2. génère le compte rendu structuré via `SummaryAgent.generate_report()` ;
+3. affiche le dict résultat (`titre`, `resume`, `points_cles`, `decisions_actions`) clé par clé dans la console.
 
-```markdown
-# Point d'avancement projet Scribe
+Pour obtenir en plus un fichier Markdown daté et sauvegardé sur disque, utiliser `SummaryAgent` directement (voir `summary_agent.py`, bloc `__main__`), qui enchaîne transcription → génération → mise en forme Markdown → sauvegarde dans `comptes_rendus/`.
 
-*Généré le 06/07/2026 à 10:15 par Scribe*
-
----
-
-## 📝 Résumé
-
-L'équipe a fait le point sur l'avancement du module de transcription...
-
-## 🔑 Points clés
-
-- whisper-large-v3-turbo retenu pour la transcription
-- Le compte rendu est désormais généré en JSON mode
-
-## ✅ Décisions et actions
-
-*Aucune décision ou action explicite mentionnée dans cet enregistrement.*
-```
-
-Si le fichier audio n'existe pas, ou si l'appel à l'API Groq échoue, un message d'erreur explicite s'affiche et le programme s'arrête (code de sortie 1) :
-
-```
-$ python src/main.py audio_samples/fichier_inexistant.wav
-🎙️  Transcription en cours... (audio_samples/fichier_inexistant.wav)
-❌ Fichier audio introuvable : audio_samples/fichier_inexistant.wav
-```
+Si le fichier audio n'existe pas, ou si l'appel à l'API Groq échoue, une exception explicite est levée (`FileNotFoundError` ou `RuntimeError`) : `manager_agent.py` l'intercepte, affiche le message d'erreur, puis quitte avec un code de sortie 1.
 
 ### Transcription audio (Speech-to-Text)
 
-La transcription est gérée par `src/speech_to_text.py`, qui appelle le modèle STT de Groq (`STT_MODEL` défini dans `config.py`, actuellement `whisper-large-v3-turbo`).
+La transcription est gérée par `src/speech_to_text_agent.py`, qui définit la classe `SpeechToTextAgent` (héritant de `Agent`). Elle appelle le modèle STT de Groq (`STT_MODEL` défini dans `config.py`, actuellement `whisper-large-v3-turbo`).
 
 ```python
-from speech_to_text import transcription_from_audio
+from speech_to_text_agent import SpeechToTextAgent
 
-texte = transcription_from_audio("audio_samples/mon_fichier.wav")
+agent = SpeechToTextAgent()
+texte = agent.get_text_from_audio("audio_samples/mon_fichier.wav")
 print(texte)
 ```
 
@@ -86,12 +71,12 @@ print(texte)
 
 Un échantillon audio léger (~30 secondes) est disponible dans `audio_samples/` pour tester la fonction sans avoir à enregistrer sa propre voix.
 
-### Compte rendu structuré (chat completions, JSON mode)
- 
-La génération du compte rendu est gérée par `src/summary.py`, qui appelle le modèle LLM de Groq (`LLM_MODEL` défini dans `config.py`, actuellement `llama-3.1-8b-instant`) via l'API "chat completions", en **JSON mode** (`response_format={"type": "json_object"}`) pour garantir une sortie directement parsable.
- 
+### Compte rendu structuré (chat completions)
+
+La génération du compte rendu est gérée par `src/summary_agent.py`, qui définit la classe `SummaryAgent` (héritant de `Agent`). Elle appelle le modèle LLM de Groq (`LLM_MODEL` défini dans `config.py`, actuellement `llama-3.1-8b-instant`) via l'API "chat completions".
+
 `generate_report()` retourne un **dict Python** avec le schéma suivant :
- 
+
 ```json
 {
   "titre": "Point d'avancement projet Scribe",
@@ -103,67 +88,80 @@ La génération du compte rendu est gérée par `src/summary.py`, qui appelle le
   "decisions_actions": []
 }
 ```
- 
-Le comportement du modèle est piloté par un **prompt système** stocké dans `src/prompts_LLM/summary_generator_prompt.txt`.
- 
+
+Le comportement du modèle est piloté par un **prompt système** stocké dans `src/prompts_LLM/summary_generator_prompt.txt`, qui impose au modèle de ne répondre qu'avec un JSON valide respectant ce schéma.
+
+> **Remarque** : dans la version actuelle, ce format JSON est imposé uniquement par les instructions du prompt système — l'appel `chat.completions.create()` n'active pas explicitement le paramètre `response_format={"type": "json_object"}` de l'API Groq. Le parsing (`json.loads`) est protégé par un `try/except json.JSONDecodeError`, qui lève un `RuntimeError` explicite (avec le contenu brut reçu) si la réponse du modèle n'est pas un JSON valide.
+
 **Format de sortie imposé** :
 - `titre` : titre du compte rendu
 - `resume` : résumé de 3 à 5 lignes
 - `points_cles` : liste des points clés
 - `decisions_actions` : liste des décisions/actions **uniquement si elles sont explicitement présentes** dans l'audio — sinon un tableau **vide** (`[]`), le modèle n'invente rien pour la remplir.
+
 **Gestion des erreurs** :
 - `FileNotFoundError` si `src/prompts_LLM/summary_generator_prompt.txt` est introuvable
-- `RuntimeError` si l'appel à l'API Groq échoue, ou si la réponse n'est pas un JSON valide (`json.JSONDecodeError`)
+- `RuntimeError` si l'appel à l'API Groq échoue, ou si la réponse n'est pas un JSON valide
 
 ### Mise en forme Markdown datée
- 
-Le dict JSON renvoyé par `generate_report()` est ensuite transformé en Markdown lisible par `src/formatteur_markdown.py`.
- 
+
+La mise en forme et la sauvegarde sont également portées par `SummaryAgent`, via deux méthodes :
+- `format_as_markdown(report)` : transforme le dict JSON en Markdown lisible et daté ;
+- `save_markdown_report(markdown_text, output_dir="comptes_rendus")` : sauvegarde ce Markdown dans un fichier nommé `AAAA-MM-JJ_HHMMSS_compte-rendu.md`.
+
 Exemple de rendu :
- 
+
 ```markdown
 # Point d'avancement projet Scribe
- 
+
 *Généré le 06/07/2026 à 09:32 par Scribe*
- 
+
 ---
- 
+
 ## 📝 Résumé
- 
+
 L'équipe a fait le point sur l'avancement du module de transcription...
- 
+
 ## 🔑 Points clés
- 
+
 - whisper-large-v3-turbo retenu pour la transcription
 - Le module de compte rendu utilise désormais le JSON mode de Groq
- 
+
 ## ✅ Décisions et actions
- 
+
 *Aucune décision ou action explicite mentionnée dans cet enregistrement.*
 ```
- 
+
 Si `decisions_actions` (ou `points_cles`) est vide, la section affiche une note en italique plutôt qu'une liste — aucun contenu n'est inventé, c'est uniquement un texte de mise en forme.
- 
+
+### Orchestration (ManagerAgent)
+
+`src/manager_agent.py` définit la classe `ManagerAgent`, qui instancie un `SpeechToTextAgent` et un `SummaryAgent` et expose une seule méthode `summaries_audio(audio_file_path)` : elle transcrit l'audio puis génère directement le compte rendu structuré (dict), sans passer par la mise en forme Markdown.
+
 ## Structure du projet
- 
+
 ```
 scribe/
 ├── src/
-│   ├── main.py                 # pipeline complet (transcription → compte rendu → markdown)
-│   ├── speech_to_text.py       # transcription audio via Groq
-│   ├── summary.py              # génération du compte rendu structuré (JSON mode)
-│   ├── formatteur_markdown.py  # mise en forme + sauvegarde du Markdown daté
-│   ├── config.py               # clé API et noms de modèles
+│   ├── agent.py                 # classe de base Agent (client Groq, lecture de fichier)
+│   ├── speech_to_text_agent.py  # SpeechToTextAgent : transcription audio via Groq
+│   ├── summary_agent.py         # SummaryAgent : génération + mise en forme + sauvegarde du compte rendu
+│   ├── manager_agent.py         # ManagerAgent : orchestre transcription puis compte rendu
+│   ├── config.py                # clé API et noms de modèles
 │   └── prompts_LLM/
 │       └── summary_generator_prompt.txt
 ├── audio_samples/               # fichiers audio (dont l'échantillon de test)
 ├── comptes_rendus/              # comptes rendus générés (ignorés sauf l'exemple)
 ├── .env
 ├── .gitignore
+├── LICENSE
 ├── requirements.txt
 └── README.md
 ```
 
+## Licence
+
+Ce projet est distribué sous licence Apache 2.0. Voir le fichier `LICENSE` pour le texte complet.
 
 ## Statut
 
@@ -203,7 +201,7 @@ Selon la documentation de Groq, la réponse contient, en plus du texte (`text`) 
   "no_speech_prob": 0.012814695
 }
 ```
- 
+
 | Champ | Signification |
 |---|---|
 | `id` | numéro du segment dans l'audio |
