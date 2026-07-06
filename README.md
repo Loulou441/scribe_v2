@@ -2,9 +2,10 @@
 
 Scribe est un outil en ligne de commande qui transforme un enregistrement audio (réunion, cours, note vocale) en compte rendu écrit et structuré.
 
-Il fonctionne en deux étapes, orchestrées par un agent chef d'orchestre :
+Il fonctionne en trois étapes, orchestrées par un agent chef d'orchestre :
 1. **Transcription** : l'audio est converti en texte brut via un modèle Speech-to-Text.
-2. **Compte rendu** : le texte brut est reformulé par un LLM en un compte rendu structuré (titre, résumé, points clés, décisions/actions).
+2. **Modération** : la transcription est analysée pour détecter une éventuelle tentative de prompt injection avant d'être transmise à l'étape suivante.
+3. **Compte rendu** : si la transcription est jugée saine, le texte brut est reformulé par un LLM en un compte rendu structuré (titre, résumé, points clés, décisions/actions), puis sauvegardé en Markdown.
 
 Les deux modèles sont appelés via l'API serverless de [Groq](https://console.groq.com/docs/overview).
 
@@ -42,12 +43,13 @@ python src/manager_agent.py
 
 Le programme :
 1. transcrit l'audio via `SpeechToTextAgent.get_text_from_audio()` ;
-2. génère le compte rendu structuré via `SummaryAgent.generate_report()` ;
-3. affiche le dict résultat (`titre`, `resume`, `points_cles`, `decisions_actions`) clé par clé dans la console.
-
-Pour obtenir en plus un fichier Markdown daté et sauvegardé sur disque, utiliser `SummaryAgent` directement (voir `summary_agent.py`, bloc `__main__`), qui enchaîne transcription → génération → mise en forme Markdown → sauvegarde dans `comptes_rendus/`.
+2. soumet la transcription à `ModeratorAgent.moderate_transcript()` pour détecter une tentative de prompt injection ;
+3. si aucune injection n'est détectée, génère le compte rendu structuré via `SummaryAgent.generate_report()`, le convertit en Markdown et le sauvegarde automatiquement dans `comptes_rendus/` (le chemin du fichier sauvegardé est affiché dans la console) ;
+4. affiche le dict résultat (`titre`, `resume`, `points_cles`, `decisions_actions`) clé par clé dans la console.
 
 Si le fichier audio n'existe pas, ou si l'appel à l'API Groq échoue, une exception explicite est levée (`FileNotFoundError` ou `RuntimeError`) : `manager_agent.py` l'intercepte, affiche le message d'erreur, puis quitte avec un code de sortie 1.
+
+> **Point d'attention** : si le `ModeratorAgent` détecte une tentative de prompt injection, `ManagerAgent.summaries_audio()` lève une `Exception` générique (pas `FileNotFoundError`/`RuntimeError`). Le bloc `try/except` de `manager_agent.py` ne capture pas ce cas précis : le programme s'arrête alors avec une trace Python complète plutôt qu'un message d'erreur propre.
 
 ### Transcription audio (Speech-to-Text)
 
@@ -69,7 +71,24 @@ print(texte)
 - `FileNotFoundError` si le chemin du fichier audio n'existe pas
 - `RuntimeError` si l'appel à l'API Groq échoue (réseau, quota dépassé, erreur serveur...)
 
-Un échantillon audio léger (~30 secondes) est disponible dans `audio_samples/` pour tester la fonction sans avoir à enregistrer sa propre voix.
+Un échantillon audio léger (~30 secondes), `test_audio_stt.mp4`, est disponible dans `audio_samples/` pour tester la fonction sans avoir à enregistrer sa propre voix.
+
+### Modération (détection de prompt injection)
+
+La modération est gérée par `src/moderator_agent.py`, qui définit la classe `ModeratorAgent` (héritant de `Agent`). Elle appelle le même modèle LLM (`LLM_MODEL`) via l'API "chat completions", mais cette fois avec `response_format={"type": "json_object"}` explicitement activé.
+
+`moderate_transcript(transcription_text)` retourne un dict avec le schéma suivant :
+
+```json
+{
+  "prompt_injection": false,
+  "raison": ""
+}
+```
+
+Le prompt système, stocké dans `src/prompts_LLM/moderator_prompt_system.txt`, définit précisément ce qui constitue une tentative de détournement (instructions visant à faire ignorer les consignes de l'agent d'analyse, changement de rôle, demande de révéler le prompt système, injection de fausses balises système, demande d'exécuter une action externe, contenu obscurci...) par opposition à du contenu légitime rapporté dans une transcription vocale (consignes adressées à des tiers, impératifs faisant partie du propos). En cas de doute réel, le prompt demande au modèle de considérer le contenu comme légitime (`prompt_injection: false`).
+
+Un second échantillon audio, `audio_samples/test_injection_text.mp4`, est fourni pour tester la détection sur un cas de tentative d'injection.
 
 ### Compte rendu structuré (chat completions)
 
@@ -90,8 +109,6 @@ La génération du compte rendu est gérée par `src/summary_agent.py`, qui déf
 ```
 
 Le comportement du modèle est piloté par un **prompt système** stocké dans `src/prompts_LLM/summary_generator_prompt.txt`, qui impose au modèle de ne répondre qu'avec un JSON valide respectant ce schéma.
-
-> **Remarque** : dans la version actuelle, ce format JSON est imposé uniquement par les instructions du prompt système — l'appel `chat.completions.create()` n'active pas explicitement le paramètre `response_format={"type": "json_object"}` de l'API Groq. Le parsing (`json.loads`) est protégé par un `try/except json.JSONDecodeError`, qui lève un `RuntimeError` explicite (avec le contenu brut reçu) si la réponse du modèle n'est pas un JSON valide.
 
 **Format de sortie imposé** :
 - `titre` : titre du compte rendu
@@ -136,7 +153,11 @@ Si `decisions_actions` (ou `points_cles`) est vide, la section affiche une note 
 
 ### Orchestration (ManagerAgent)
 
-`src/manager_agent.py` définit la classe `ManagerAgent`, qui instancie un `SpeechToTextAgent` et un `SummaryAgent` et expose une seule méthode `summaries_audio(audio_file_path)` : elle transcrit l'audio puis génère directement le compte rendu structuré (dict), sans passer par la mise en forme Markdown.
+`src/manager_agent.py` définit la classe `ManagerAgent`, qui instancie un `SpeechToTextAgent`, un `ModeratorAgent` et un `SummaryAgent`, et expose une seule méthode `summaries_audio(audio_file_path)` :
+1. transcription de l'audio ;
+2. modération de la transcription ;
+3. si une injection est détectée, une `Exception` est levée avec la raison fournie par `ModeratorAgent` (aucun compte rendu n'est généré) ;
+4. sinon, génération du compte rendu, mise en forme Markdown et sauvegarde automatique dans `comptes_rendus/` (le chemin du fichier est affiché), puis retour du dict du compte rendu.
 
 ## Structure du projet
 
@@ -145,12 +166,14 @@ scribe/
 ├── src/
 │   ├── agent.py                 # classe de base Agent (client Groq, lecture de fichier)
 │   ├── speech_to_text_agent.py  # SpeechToTextAgent : transcription audio via Groq
+│   ├── moderator_agent.py       # ModeratorAgent : détection de prompt injection dans la transcription
 │   ├── summary_agent.py         # SummaryAgent : génération + mise en forme + sauvegarde du compte rendu
-│   ├── manager_agent.py         # ManagerAgent : orchestre transcription puis compte rendu
+│   ├── manager_agent.py         # ManagerAgent : orchestre transcription → modération → compte rendu
 │   ├── config.py                # clé API et noms de modèles
 │   └── prompts_LLM/
+│       ├── moderator_prompt_system.txt
 │       └── summary_generator_prompt.txt
-├── audio_samples/               # fichiers audio (dont l'échantillon de test)
+├── audio_samples/               # fichiers audio (dont les échantillons de test)
 ├── comptes_rendus/              # comptes rendus générés (ignorés sauf l'exemple)
 ├── .env
 ├── .gitignore

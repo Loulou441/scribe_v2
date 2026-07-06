@@ -2,7 +2,9 @@ from config import LLM_MODEL
 from agent import Agent
 from speech_to_text_agent import SpeechToTextAgent
 import json
+from pathlib import Path
 
+PROMPT_MODERATOR_PATH = Path(__file__).parent / "prompts_LLM" / "moderator_prompt_system.txt"
 
 class ModeratorAgent(Agent):
 	def __init__(self):
@@ -15,7 +17,7 @@ class ModeratorAgent(Agent):
 			messages=[
 				{
 					"role": "system",
-					"content": Agent.read_file("./src/prompts_LLM/moderator_prompt_system.txt")
+					"content": Agent.read_file(PROMPT_MODERATOR_PATH)
 				},
 				{
 					"role": "user",

@@ -10,7 +10,7 @@ from config import LLM_MODEL
 from speech_to_text_agent import SpeechToTextAgent
 import json
 
-PROMPT_PATH = Path(__file__).parent / "prompts_LLM" / "summary_generator_prompt.txt"
+PROMPT__SUMMARY_PATH = Path(__file__).parent / "prompts_LLM" / "summary_generator_prompt.txt"
 
 class SummaryAgent(Agent):
 
@@ -18,9 +18,9 @@ class SummaryAgent(Agent):
         super().__init__()
 
     def load_system_prompt(self) -> str:
-        if not PROMPT_PATH.is_file():
-            raise FileNotFoundError(f"Fichier de prompt système introuvable : {PROMPT_PATH}")
-        return PROMPT_PATH.read_text(encoding="utf-8")
+        if not PROMPT__SUMMARY_PATH.is_file():
+            raise FileNotFoundError(f"Fichier de prompt système introuvable : {PROMPT__SUMMARY_PATH}")
+        return PROMPT__SUMMARY_PATH.read_text(encoding="utf-8")
 
     def generate_report(self, transcription: str) -> str:
         system_prompt = self.load_system_prompt()
@@ -33,6 +33,7 @@ class SummaryAgent(Agent):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": transcription},
                 ],
+                response_format={"type": "json_object"},
             )
         except (APIError, APIConnectionError, RateLimitError) as e:
             raise RuntimeError(
